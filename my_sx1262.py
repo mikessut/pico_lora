@@ -21,6 +21,7 @@ https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.htm
 import machine
 from machine import Pin, SPI, SoftSPI
 import time
+import asyncio
 
 pin_sck = Pin(10, Pin.OUT)
 pin_mosi = Pin(11, Pin.OUT)
@@ -29,7 +30,11 @@ pin_cs = Pin(3, Pin.OUT, value=1)
 
 pin_busy = Pin(2, Pin.IN)
 
-pin_led = Pin(25, Pin.OUT)
+pin_reset = Pin(15, Pin.OUT, value=1)
+
+pin_dio1 = Pin(20, Pin.IN)
+
+pin_led = Pin('LED', Pin.OUT)
 
 
 spi = SPI(1, sck=pin_sck, mosi=pin_mosi, miso=pin_miso)
@@ -49,6 +54,20 @@ def op_code(code, total_bytes):
 def get_status():
     """
     Status codes on page: 95
+
+    chip modes [6:4]:
+    0x2: Standby_RC
+    0x3: STBY_XOSC
+    0x4: FS
+    0x5: RX
+    0x6: TX
+
+    3:1 command status:
+    0x2: data avail
+    0x3: command timeout
+    0x4: command proc error
+    0x5: failure to execute command
+    0x6: command tx done (xmision terminated)
     """
     buff = bytearray(2)
     buff[0] = 0xc0  # getStatus
@@ -152,11 +171,12 @@ def set_packet_params(payload_size):
     """
     buff = bytearray(10)
     buff[0] = 0x8c
-    buff[2] = 0xe  # no idea...
-    buff[3] = 0x0
-    buff[4] = payload_size
-    buff[5] = 0x1
-    buff[6] = 0x0
+    # buff[1] = 
+    buff[2] = 0xe  # no idea... preamble length
+    buff[3] = 0x0  # 0 => variable length packet
+    buff[4] = payload_size  # in receive mode it is the max we can receive
+    buff[5] = 0x1  # crc on
+    buff[6] = 0x0  # Standard Iq
     
     pin_cs.value(0)
     spi.write(buff)
@@ -167,9 +187,10 @@ def set_modulation_params():
     """
     pg. 87
     """
-    buff = bytearray(10)
+    buff = bytearray(9)
     buff[0] = 0x8b
-    buff[1] = 0 # SF
+    # buff[1] = 0x1 # SF5  pg 87
+    buff[1] = 0x0c # SF7  pg 87 longest time on error
     # buff[2] = 0x0  # BW 7.81 kHz  (lowest)
     buff[3] = 0x01  # CR
     # buff[4] = 0 # low data rate optimize if  0x01
@@ -269,10 +290,101 @@ def set_rf_freq(freq):
     pin_cs.value(1)
 
 
+def set_rx(timeout=0):
+    """
+    pg. 69
+    0xFFFFFF for continuous mode
+    """
+    buf = bytearray(4)
+    buf[0] = 0x82
+    buf[1] = (timeout >> 16) & 0xff
+    buf[2] = (timeout >> 8) & 0xff
+    buf[3] = timeout & 0xff
+    pin_cs.value(0)
+    spi.write(buf)
+    pin_cs.value(1)
+
+
+def get_irq_status():
+    """
+    pg. 80
+    """
+    buf = bytearray(4)
+    buf_in = bytearray(4)
+    buf[0] = 0x12
+    
+    pin_cs.value(0)
+    spi.write_readinto(buf, buf_in)
+    pin_cs.value(1)
+    return buf_in[1:]
+
+
+def clear_irq_status(mask):
+    """
+    pg. 81
+    """
+    buf = bytearray(3)
+    buf[0] = 0x02
+    buf[1] = (mask >> 8) & 0xff
+    buf[2] = mask & 0xff
+    pin_cs.value(0)
+    spi.write(buf)
+    pin_cs.value(1)
+
+
+def read_reg(reg):
+    """
+    IRQ_reg: pg. 80"""
+    pass
+
+
+def set_dio_irq_params(mask):
+    """
+    pg 79
+    """
+    buf = bytearray(9)
+    buf[0] = 0x08
+    buf[1] = (mask >> 8) & 0xff
+    buf[2] = mask & 0xff
+    # set irq to DIO1
+    buf[3] = (mask >> 8) & 0xff
+    buf[4] = mask & 0xff
+    
+    pin_cs.value(0)
+    spi.write(buf)
+    pin_cs.value(1)
+
+
+def SetDIO2AsRfSwitchCtrl():
+    buf = bytearray(2)
+    buf[0] = 0x9d
+    buf[1] = 0x1  # DIO2 as RF switch
+    pin_cs.value(0)
+    spi.write(buf)
+    pin_cs.value(1)
+
+
+def SetDIO3AsTCXOCtrl(delay=5 << 6):
+    """
+    pg 81
+    """
+    buf = bytearray(5)
+    buf[0] = 0x97
+    # buf[1] = 0x07  # 3.3 V? not sur what this should be
+    buf[1] = 0x01  # 1.7 V? not sur what this should be
+    buf[2] = (delay >> 16) & 0xff
+    buf[3] = (delay >> 8) & 0xff 
+    buf[4] = delay & 0xff
+    pin_cs.value(0)
+    spi.write(buf)
+    pin_cs.value(1)
+
 
 def tx():
     # Basic transmit description page 99
     # 2. set_lora
+    SetDIO2AsRfSwitchCtrl()
+    SetDIO3AsTCXOCtrl()
     set_lora()
     # 3. set_rf_freq
     set_rf_freq(902300000)
@@ -295,20 +407,74 @@ def tx():
     # 9. set packet params
     set_packet_params(8)
 
-    # 10. config DIO and IRQ
+    # 10. config DIO and IRQ:  TxDone IRQ and map this IRQ to a DIO (DIO1, DIO2 or DIO3)
+    set_dio_irq_params(0x1)
     # 11. sync word
     # 12. transmit
     set_tx()
 
 
+def rx():
+    # 1. set stby
+    # 2. set lora
+    SetDIO2AsRfSwitchCtrl()
+    SetDIO3AsTCXOCtrl()
+    set_lora()
+    # 3. set frequency
+    set_rf_freq(902300000)
+    # 4. set base addr
+    set_buffer_base_addr()
+    # 5. modulation params
+    set_modulation_params()
+    # 6. frame format
+    set_packet_params(10)  # not recv need to know size? probalby not
+    # 7. IRQs: to select the IRQ RxDone and map this IRQ to a DIO (DIO1 or DIO2 or DIO3), set IRQ Timeout as well
+    set_dio_irq_params(0x202)
+
+    # 8. sync word
+    # 9. setrx
+    set_rx()
+
+
 def main():
+    
+    # await asyncio.sleep_ms(2000)
+    time.sleep(2)
+    clear_errors()
+    clear_irq_status(1)
+    
+    # while True:
+    pin_led.value(1)
+    time.sleep(0.5)
+    pin_led.value(0)
+    
+    tx()
+        
+        # while pin_dio1.value() == 0:
+        #     await asyncio.sleep_ms(100)
+        #     print(pin_dio1.value())
+        
+        # tmp = get_irq_status()
+        # print(tmp)
+        
+        # clear_irq_status(1)
+        
+        # await asyncio.sleep_ms(5000)
 
-    while True:
-        pin_led.value(1)
-        time.sleep(0.5)
-        pin_led.value(0)
+def dio_irq(pin):
+    pin_led.value(1)
+    time.sleep(1)
+    pin_led.value(0)
 
-        tx()
+    tmp = get_irq_status()
+    print(tmp)
+
+    clear_irq_status(1)
+
+    tx()
+
+pin_dio1.irq(dio_irq, trigger=Pin.IRQ_RISING)
+
 
 # Lora model description pg. 37
 
