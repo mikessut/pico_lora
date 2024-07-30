@@ -19,7 +19,7 @@ https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.htm
 """
 
 import machine
-from machine import Pin, SPI, SoftSPI
+from machine import Pin, SPI, Timer
 import time
 import asyncio
 
@@ -51,6 +51,22 @@ def op_code(code, total_bytes):
     return buff_in
 
 
+status_modes = {
+    0x2: 'Standby_RC',
+    0x3: 'STBY_XOSC',
+    0x4: 'FS',
+    0x5: 'RX',
+    0x6: 'TX',
+}
+
+cmd_status = {
+    0x2: 'data avail',
+    0x3: 'command timeout',
+    0x4: 'command proc error',
+    0x5: 'failure to execute command',
+    0x6: 'command tx done (xmision terminated)',
+}
+
 def get_status():
     """
     Status codes on page: 95
@@ -77,7 +93,10 @@ def get_status():
     spi.write_readinto(buff, buff_in)
     
     pin_cs.value(1)
-    return (hex(buff_in[1]), hex((buff_in[1] & 0x70) >> 4), hex((buff_in[1] & 0xe) >> 1))
+    return (buff_in[1], ((buff_in[1] & 0x70) >> 4), ((buff_in[1] & 0xe) >> 1),
+            status_modes.get((buff_in[1] & 0x70) >> 4),
+            cmd_status.get((buff_in[1] & 0xe) >> 1)
+            )
 
 
 def set_lora():
@@ -192,7 +211,7 @@ def set_modulation_params():
     # buff[1] = 0x1 # SF5  pg 87
     buff[1] = 0x0c # SF7  pg 87 longest time on error
     # buff[2] = 0x0  # BW 7.81 kHz  (lowest)
-    buff[3] = 0x01  # CR
+    buff[3] = 0x04  # CR 1-4 higher has more error immunity
     # buff[4] = 0 # low data rate optimize if  0x01
     pin_cs.value(0)
     spi.write(buff)
@@ -380,7 +399,21 @@ def SetDIO3AsTCXOCtrl(delay=5 << 6):
     pin_cs.value(1)
 
 
-def tx():
+def GetRxBufferStatus():
+    """
+    pg 96
+    returns 3 bytes: Status, PayloadLengthRx, RxStartBufferPointer
+    """
+    buf = bytearray(4)
+    buf[0] = 0x13
+    buf_in = bytearray(4)
+    pin_cs.value(0)
+    spi.write_readinto(buf, buf_in)
+    pin_cs.value(1)
+    return buf_in[1:]
+
+
+def tx(payload: bytes):
     # Basic transmit description page 99
     # 2. set_lora
     SetDIO2AsRfSwitchCtrl()
@@ -399,13 +432,13 @@ def tx():
     set_buffer_base_addr()
 
     # 7. write buffer
-    write_buffer(0, b'hi there')
+    write_buffer(0, payload)
 
     # 8. set modulation params
     set_modulation_params()
 
     # 9. set packet params
-    set_packet_params(8)
+    set_packet_params(len(payload))
 
     # 10. config DIO and IRQ:  TxDone IRQ and map this IRQ to a DIO (DIO1, DIO2 or DIO3)
     set_dio_irq_params(0x1)
@@ -417,6 +450,7 @@ def tx():
 def rx():
     # 1. set stby
     # 2. set lora
+    clear_errors()
     SetDIO2AsRfSwitchCtrl()
     SetDIO3AsTCXOCtrl()
     set_lora()
@@ -427,13 +461,26 @@ def rx():
     # 5. modulation params
     set_modulation_params()
     # 6. frame format
-    set_packet_params(10)  # not recv need to know size? probalby not
+    set_packet_params(50)  # max rx length
     # 7. IRQs: to select the IRQ RxDone and map this IRQ to a DIO (DIO1 or DIO2 or DIO3), set IRQ Timeout as well
     set_dio_irq_params(0x202)
 
     # 8. sync word
     # 9. setrx
     set_rx()
+
+
+def led_blink(num, delay=0.25):
+    for _ in range(num):
+        pin_led.value(1)
+        time.sleep(delay)
+        pin_led.value(0)
+        time.sleep(delay)
+    
+
+def status_blink():
+    _, mode, cmd, _, _ = get_status()
+    led_blink(mode, .25)
 
 
 def main():
@@ -443,37 +490,100 @@ def main():
     clear_errors()
     clear_irq_status(1)
     
-    # while True:
-    pin_led.value(1)
-    time.sleep(0.5)
-    pin_led.value(0)
+    # led_blink(5)
+    status_blink()
     
-    tx()
+    tim = Timer(-1)
+    tim.init(mode=Timer.PERIODIC, period=5000, callback=lambda x:status_blink())
+    
+    # tx(b'strobe')
+    rx()
         
-        # while pin_dio1.value() == 0:
-        #     await asyncio.sleep_ms(100)
-        #     print(pin_dio1.value())
-        
-        # tmp = get_irq_status()
-        # print(tmp)
-        
-        # clear_irq_status(1)
-        
-        # await asyncio.sleep_ms(5000)
 
-def dio_irq(pin):
-    pin_led.value(1)
-    time.sleep(1)
-    pin_led.value(0)
+payload = b'empty'
+
+def dio_echo_irq(pin):
+    
 
     tmp = get_irq_status()
     print(tmp)
 
-    clear_irq_status(1)
+    if tmp[2] & 0x2 == 0x2:
+        # rxdone
+        led_blink(1)
+        
+        buf = GetRxBufferStatus() # Status, PayloadLengthRx, RxStartBufferPointer
+        payload = read_buffer(buf[2], buf[1])
+        set_standby(0)
+        tx(payload)
 
-    tx()
+    elif tmp[2] & 0x1 == 0x1:
+        # txdone
+        led_blink(2)
+    
+        # tx()
+        # back to rx
+        set_standby(0)
+        rx()
+    
+    clear_irq_status(0x3)
 
-pin_dio1.irq(dio_irq, trigger=Pin.IRQ_RISING)
+
+def dio_rx_irq(pin):
+    
+    tmp = get_irq_status()
+    print(tmp)
+
+    if tmp[2] & 0x2 == 0x2:
+        # rxdone
+        led_blink(1)
+        
+        buf = GetRxBufferStatus() # Status, PayloadLengthRx, RxStartBufferPointer
+        payload = read_buffer(buf[2], buf[1])
+        print("rcvd", payload)
+        set_standby(0)
+        # tx(payload)
+        # pass
+    elif tmp[2] & 0x1 == 0x1:
+        # txdone
+        led_blink(2) 
+    
+        # tx()
+        # back to rx
+        set_standby(0)
+        rx()
+    
+    clear_irq_status(0x3)
+    
+
+
+def dio_strobe_irq(pin):
+    
+
+    tmp = get_irq_status()
+    print(tmp)
+
+    if tmp[2] & 0x2 == 0x2:
+        # rxdone
+        led_blink(1)
+        
+        # buf = GetRxBufferStatus() # Status, PayloadLengthRx, RxStartBufferPointer
+        # payload = read_buffer(buf[2], buf[1])
+        # set_standby(0)
+        # tx(payload)
+        pass
+    elif tmp[2] & 0x1 == 0x1:
+        # txdone
+        led_blink(2)
+
+        tx(b'strobe')
+        # back to rx
+        
+    
+    clear_irq_status(0x3)
+
+# pin_dio1.irq(dio_echo_irq, trigger=Pin.IRQ_RISING)
+pin_dio1.irq(dio_rx_irq, trigger=Pin.IRQ_RISING)
 
 
 # Lora model description pg. 37
