@@ -606,7 +606,8 @@ def dio_echo_irq(pin):
 
         # time.sleep(5)
         print("entering rx mode")
-        rx(0.5)
+        # rx(0.5)
+        rx()
     elif tmp[1] & 0x2 == 0x2:
         # timeout
         print("timeout")
@@ -671,7 +672,7 @@ def dio_strobe_irq(pin):
         # txdone
         led_blink(2)
         time.sleep(2)
-        
+
         tx(b'strobe')
         # back to rx
         
