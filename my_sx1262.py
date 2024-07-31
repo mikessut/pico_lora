@@ -602,7 +602,7 @@ def dio_rx_irq(pin):
     
     tmp = get_irq_status()
     print(tmp)
-
+    
     if tmp[2] & 0x2 == 0x2:
         # rxdone
         led_blink(1)
@@ -622,8 +622,11 @@ def dio_rx_irq(pin):
         # back to rx
         set_standby(0)
         rx()
+    elif tmp[1] & 0x2 == 0x2:
+        # timeout
+        rx()
     
-    clear_irq_status(0x3)
+    clear_irq_status(0x203)
     
 
 
