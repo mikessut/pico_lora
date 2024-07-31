@@ -573,38 +573,22 @@ def dio_echo_irq(pin):
     tmp = get_irq_status()
     print('irq status:', tmp)
     clear_irq_status(0x203)
-
+    # 
     if tmp[2] & 0x2 == 0x2:
         # rxdone
         led_blink(1)
-
-        tim.deinit()
-        
         buf = GetRxBufferStatus() # Status, PayloadLengthRx, RxStartBufferPointer
         payload = read_buffer(buf[2], buf[1])
         print('echo rcv:', payload)
         set_standby(0)
+        time.sleep(2)
         tx(payload)
-        # rx()
-
     elif tmp[2] & 0x1 == 0x1:
         # txdone
         # led_blink(2)
     
         print("echo irq xmit complete")
-        # tx()
-        # back to rx
-        # set_standby(0)
-        # time.sleep(.5)
-        # _, mode, cmd, _, _ = get_status()
-        # while mode != 2:
-        #     time.sleep(.5)
-        #     _, mode, cmd, _, _ = get_status()
-
-        # while pin_busy.value() == 1:
-        #     time.sleep(.5)
-
-        # time.sleep(5)
+        
         print("entering rx mode")
         # rx(0.5)
         rx()
@@ -612,16 +596,6 @@ def dio_echo_irq(pin):
         # timeout
         print("timeout")
         rx()
-
-        # set_packet_params(50)  # max rx length
-        # # 7. IRQs: to select the IRQ RxDone and map this IRQ to a DIO (DIO1 or DIO2 or DIO3), set IRQ Timeout as well
-        # set_dio_irq_params(0x202)
-
-        # # 8. sync word
-        # # 9. setrx
-        # set_rx()
-    
-    
 
 
 def dio_rx_irq(pin):
